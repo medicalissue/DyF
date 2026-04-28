@@ -42,6 +42,11 @@ echo "[bootstrap] $(date -u +%Y-%m-%dT%H:%M:%SZ) starting on $(hostname)"
 : "${CKPT_BUCKET:?CKPT_BUCKET required}"
 : "${AWS_DEFAULT_REGION:=us-west-2}"
 : "${WORKSPACE:=/workspace}"
+# Pre-built venv tarball: contains Python 3.10 + PyTorch (CUDA 13 build)
+# + timm + wandb + everything else needed for training. Reused from
+# NELU — same Python/torch versions, identical dependency surface.
+: "${VENV_S3_URL:=s3://nelu-datasets/env/nelu-venv-py310-cu130.tar.gz}"
+: "${VENV_ROOT:=/opt/dyf-venv}"
 export AWS_DEFAULT_REGION
 
 die() {
@@ -110,24 +115,55 @@ else
         || die "repo-clone failed" 6
 fi
 
-# ── 3. Install Python deps ───────────────────────────────────────
-# AWS DL AMI ships with PyTorch + CUDA + python3, but no `python`
-# symlink. Install one so orchestrate.sh / dryrun.sh / yaml_to_args.py
-# all just call `python` like locally.
-if ! command -v python >/dev/null 2>&1; then
-    py=$(command -v python3 || true)
-    if [[ -n "$py" ]]; then
-        echo "[bootstrap] symlinking $py → /usr/local/bin/python"
-        ln -sf "$py" /usr/local/bin/python
+# ── 3. Install Python env ────────────────────────────────────────
+# AWS DL Base AMI gives us NVIDIA driver + CUDA but NOT PyTorch. We
+# fetch the pre-built venv tarball NELU uses — it already has Python
+# 3.10 + torch (cu130) + timm + wandb + everything our trainer needs.
+# Skip if the venv already exists (from a previous bootstrap on the
+# same root volume — rare on spot, but cheap to check).
+if [[ -x "${VENV_ROOT}/bin/python" ]]; then
+    echo "[bootstrap] reusing existing ${VENV_ROOT}"
+else
+    step fetch-venv aws s3 cp "$VENV_S3_URL" /tmp/dyf-venv.tar.gz \
+        || die "fetch-venv failed" 4
+    step extract-venv bash -c \
+        "mkdir -p \"$(dirname "$VENV_ROOT")\" && \
+         tar xzf /tmp/dyf-venv.tar.gz -C \"$(dirname "$VENV_ROOT")\" && \
+         rm -f /tmp/dyf-venv.tar.gz" \
+        || die "extract-venv failed" 5
+fi
+
+# The tarball expands to a directory whose name we don't control —
+# detect it. NELU's tarball expands to `nelu-venv-py310-cu130/`; rename
+# to our expected $VENV_ROOT so the activate path is stable.
+if [[ ! -x "${VENV_ROOT}/bin/python" ]]; then
+    parent="$(dirname "$VENV_ROOT")"
+    cand=$(find "$parent" -maxdepth 1 -mindepth 1 -type d -name '*venv*' \
+           -not -path "$VENV_ROOT" 2>/dev/null | head -1)
+    if [[ -n "$cand" && -x "$cand/bin/python" ]]; then
+        echo "[bootstrap] renaming $cand → $VENV_ROOT"
+        mv "$cand" "$VENV_ROOT"
     else
-        die "no python3 found on this AMI" 7
+        die "venv tarball extracted but no python found under $parent" 6
     fi
 fi
-# Install the small set of project extras the AMI doesn't ship. timm
-# is required by main.py so this MUST succeed — making it fatal saves
-# us from a confusing rc=127 chain inside orchestrate.sh.
-step pip-install python -m pip install --quiet --upgrade \
-    timm wandb pyyaml awscli || die "pip-install failed" 8
+
+# Activate the venv globally so all downstream scripts (orchestrate.sh,
+# torchrun, etc.) inherit it. Source instead of just adding to PATH so
+# `python -m pip install` lands inside the venv site-packages.
+# shellcheck disable=SC1090
+source "${VENV_ROOT}/bin/activate"
+
+# Sanity: torch + torchrun must be importable now.
+step verify-env python -c \
+    "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())" \
+    || die "torch import failed in venv" 7
+command -v torchrun >/dev/null 2>&1 || die "torchrun not on PATH after venv activate" 8
+
+# Top-up: pyyaml + awscli are tiny and may have been pinned in the
+# venv. Install awscli into venv so orchestrate.sh's `aws s3 cp` works
+# from this Python. Make this non-fatal — the AMI usually has aws too.
+python -m pip install --quiet --upgrade pyyaml awscli >/dev/null 2>&1 || true
 
 # ── 4. Orchestrate ────────────────────────────────────────────────
 : "${ENTRY_SCRIPT:=scripts/orchestrate.sh}"

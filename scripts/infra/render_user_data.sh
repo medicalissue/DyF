@@ -21,12 +21,13 @@ set -euo pipefail
 : "${AWS_DEFAULT_REGION:=us-west-2}"
 : "${JOB_ORDER:=}"
 : "${ENTRY_SCRIPT:=}"
+: "${VENV_S3_URL:=s3://nelu-datasets/env/nelu-venv-py310-cu130.tar.gz}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 template="$SCRIPT_DIR/user-data.sh"
 
 export REPO_URL REPO_REF CKPT_BUCKET WANDB_API_KEY WANDB_PROJECT \
-       WANDB_ENTITY AWS_DEFAULT_REGION JOB_ORDER ENTRY_SCRIPT
+       WANDB_ENTITY AWS_DEFAULT_REGION JOB_ORDER ENTRY_SCRIPT VENV_S3_URL
 
 python3 - "$template" <<'PY'
 import os, sys, pathlib
@@ -35,6 +36,7 @@ keys = [
     "REPO_URL", "REPO_REF", "CKPT_BUCKET",
     "WANDB_API_KEY", "WANDB_PROJECT", "WANDB_ENTITY",
     "AWS_DEFAULT_REGION", "JOB_ORDER", "ENTRY_SCRIPT",
+    "VENV_S3_URL",
 ]
 for k in keys:
     tpl = tpl.replace(f"@@{k}@@", os.environ.get(k, ""))

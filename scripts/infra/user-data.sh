@@ -18,6 +18,7 @@ export WANDB_API_KEY="@@WANDB_API_KEY@@"
 export AWS_DEFAULT_REGION="@@AWS_DEFAULT_REGION@@"
 export JOB_ORDER="@@JOB_ORDER@@"
 export ENTRY_SCRIPT="@@ENTRY_SCRIPT@@"
+export VENV_S3_URL="@@VENV_S3_URL@@"
 
 # Throwaway clone just to pick up scripts/bootstrap.sh. The real
 # /workspace is set up by bootstrap.sh itself.
