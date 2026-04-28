@@ -19,7 +19,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None, log_writer=None,
                     wandb_logger=None, start_steps=None, lr_schedule_values=None, wd_schedule_values=None,
-                    num_training_steps_per_epoch=None, update_freq=None, use_amp=False):
+                    num_training_steps_per_epoch=None, update_freq=None, use_amp=False,
+                    amp_dtype: str = 'float16'):
+    # bf16 has fp32's exponent range → no underflow → no GradScaler.
+    # fp16 keeps the legacy NativeScaler path. We resolve once here so
+    # the inner loop just branches on `use_scaler`.
+    autocast_dtype = torch.bfloat16 if amp_dtype == 'bfloat16' else torch.float16
+    use_scaler = use_amp and amp_dtype != 'bfloat16'
     model.train(True)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -28,6 +34,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     print_freq = 10
 
     optimizer.zero_grad()
+    grad_norm = None  # bf16/fp32 paths leave it None when no clip is set
 
     for data_iter_step, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         step = data_iter_step // update_freq
@@ -49,7 +56,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             samples, targets = mixup_fn(samples, targets)
 
         if use_amp:
-            with torch.cuda.amp.autocast():
+            with torch.cuda.amp.autocast(dtype=autocast_dtype):
                 output = model(samples)
                 loss = criterion(output, targets)
         else: # full precision
@@ -62,7 +69,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             print("Loss is {}, stopping training".format(loss_value))
             assert math.isfinite(loss_value)
 
-        if use_amp:
+        if use_scaler:
+            # fp16 path: NativeScaler does scale → backward → unscale → step.
             # this attribute is added by timm on one optimizer (adahessian)
             is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
             loss /= update_freq
@@ -73,9 +81,15 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 optimizer.zero_grad()
                 if model_ema is not None:
                     model_ema.update(model)
-        else: # full precision
+        else:
+            # bf16 (use_amp=True) and full-precision paths share the same
+            # plain backward + step logic — the autocast context above
+            # already cast forward to bf16 in the bf16 case.
             loss /= update_freq
             loss.backward()
+            grad_norm = None
+            if max_norm is not None and max_norm > 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             if (data_iter_step + 1) % update_freq == 0:
                 optimizer.step()
                 optimizer.zero_grad()
@@ -104,7 +118,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             if group["weight_decay"] > 0:
                 weight_decay_value = group["weight_decay"]
         metric_logger.update(weight_decay=weight_decay_value)
-        if use_amp:
+        if grad_norm is not None:
             metric_logger.update(grad_norm=grad_norm)
 
         if log_writer is not None:
@@ -113,7 +127,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             log_writer.update(lr=max_lr, head="opt")
             log_writer.update(min_lr=min_lr, head="opt")
             log_writer.update(weight_decay=weight_decay_value, head="opt")
-            if use_amp:
+            if grad_norm is not None:
                 log_writer.update(grad_norm=grad_norm, head="opt")
             log_writer.set_step()
 
@@ -125,7 +139,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             }, commit=False)
             if class_acc:
                 wandb_logger._wandb.log({'Rank-0 Batch Wise/train_class_acc': class_acc}, commit=False)
-            if use_amp:
+            if grad_norm is not None:
                 wandb_logger._wandb.log({'Rank-0 Batch Wise/train_grad_norm': grad_norm}, commit=False)
             wandb_logger._wandb.log({'Rank-0 Batch Wise/global_train_step': it})
             
@@ -136,7 +150,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 @torch.no_grad()
-def evaluate(data_loader, model, device, use_amp=False):
+def evaluate(data_loader, model, device, use_amp=False, amp_dtype: str = 'float16'):
+    autocast_dtype = torch.bfloat16 if amp_dtype == 'bfloat16' else torch.float16
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -153,7 +168,7 @@ def evaluate(data_loader, model, device, use_amp=False):
 
         # compute output
         if use_amp:
-            with torch.cuda.amp.autocast():
+            with torch.cuda.amp.autocast(dtype=autocast_dtype):
                 output = model(images)
                 loss = criterion(output, target)
         else:

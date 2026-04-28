@@ -481,7 +481,9 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, mo
             'model': model_without_ddp.state_dict(),
             'optimizer': optimizer.state_dict(),
             'epoch': epoch,
-            'scaler': loss_scaler.state_dict(),
+            # bf16 / fp32 paths set loss_scaler=None — there's no
+            # GradScaler state to persist. fp16 keeps the legacy save.
+            'scaler': loss_scaler.state_dict() if loss_scaler is not None else None,
             'args': args,
         }
 
@@ -530,6 +532,9 @@ def auto_load_model(args, model, model_without_ddp, optimizer, loss_scaler, mode
                     model_ema.ema.load_state_dict(checkpoint['model_ema'])
                 else:
                     model_ema.ema.load_state_dict(checkpoint['model'])
-            if 'scaler' in checkpoint:
+            # Only restore scaler state if BOTH the checkpoint has it and
+            # the current run uses one (bf16/fp32 leave it None).
+            if 'scaler' in checkpoint and checkpoint['scaler'] is not None \
+                    and loss_scaler is not None:
                 loss_scaler.load_state_dict(checkpoint['scaler'])
             print("With optim & sched!")

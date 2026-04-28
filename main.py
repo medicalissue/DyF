@@ -211,8 +211,18 @@ def get_args_parser():
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
 
-    parser.add_argument('--use_amp', type=str2bool, default=False, 
+    parser.add_argument('--use_amp', type=str2bool, default=False,
                         help="Use PyTorch's AMP (Automatic Mixed Precision) or not")
+    parser.add_argument('--amp_dtype', type=str, default='float16',
+                        choices=['float16', 'bfloat16'],
+                        help='AMP precision. bfloat16 on H100/A100 skips '
+                             'GradScaler entirely (no underflow risk).')
+    parser.add_argument('--compile', type=str2bool, default=False,
+                        help='Wrap model with torch.compile after DDP.')
+    parser.add_argument('--compile_mode', type=str, default='default',
+                        choices=['default', 'reduce-overhead', 'max-autotune'],
+                        help='torch.compile mode. max-autotune is slow to '
+                             'warm up but ~5-10%% faster steady-state.')
 
     # Weights and Biases arguments
     parser.add_argument('--enable_wandb', type=str2bool, default=False,
@@ -412,12 +422,28 @@ def main(args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
         model_without_ddp = model.module
 
+    # torch.compile sits OUTSIDE DDP (DDP wraps the eager module; compile
+    # then wraps the DDP wrapper). The optimizer reads parameters from
+    # model_without_ddp, which still points at the un-compiled module —
+    # compile wraps forward/backward only, parameters are untouched.
+    if args.compile:
+        if not hasattr(torch, 'compile'):
+            raise RuntimeError("torch.compile requires PyTorch >= 2.0")
+        print(f"Compiling model with torch.compile(mode={args.compile_mode!r})")
+        model = torch.compile(model, mode=args.compile_mode)
+
     optimizer = create_optimizer(
         args, model_without_ddp, skip_list=None,
-        get_num_layer=assigner.get_layer_id if assigner is not None else None, 
+        get_num_layer=assigner.get_layer_id if assigner is not None else None,
         get_layer_scale=assigner.get_scale if assigner is not None else None)
 
-    loss_scaler = NativeScaler() # if args.use_amp is False, this won't be used
+    # bf16 has the same dynamic range as fp32 — no underflow, GradScaler
+    # is a no-op. Pass None to engine.train_one_epoch so it skips the
+    # scaler.scale()/unscale_() dance and just .backward()s directly.
+    if args.use_amp and args.amp_dtype == 'bfloat16':
+        loss_scaler = None
+    else:
+        loss_scaler = NativeScaler()  # used only when use_amp + fp16
 
     print("Use Cosine LR scheduler")
     lr_schedule_values = utils.cosine_scheduler(
@@ -447,7 +473,7 @@ def main(args):
 
     if args.eval:
         print(f"Eval only mode")
-        test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp)
+        test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp, amp_dtype=args.amp_dtype)
         print(f"Accuracy of the network on {len(dataset_val)} test images: {test_stats['acc1']:.5f}%")
         return
 
@@ -473,7 +499,8 @@ def main(args):
             log_writer=log_writer, wandb_logger=wandb_logger, start_steps=epoch * num_training_steps_per_epoch,
             lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
             num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq,
-            use_amp=args.use_amp
+            use_amp=args.use_amp,
+            amp_dtype=args.amp_dtype,
         )
         if args.output_dir and args.save_ckpt:
             if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
@@ -481,7 +508,7 @@ def main(args):
                     args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                     loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
         if data_loader_val is not None:
-            test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp)
+            test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp, amp_dtype=args.amp_dtype)
             print(f"Accuracy of the model on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
             if max_accuracy < test_stats["acc1"]:
                 max_accuracy = test_stats["acc1"]
@@ -503,7 +530,7 @@ def main(args):
 
             # repeat testing routines for EMA, if ema eval is turned on
             if args.model_ema and args.model_ema_eval:
-                test_stats_ema = evaluate(data_loader_val, model_ema.ema, device, use_amp=args.use_amp)
+                test_stats_ema = evaluate(data_loader_val, model_ema.ema, device, use_amp=args.use_amp, amp_dtype=args.amp_dtype)
                 print(f"Accuracy of the model EMA on {len(dataset_val)} test images: {test_stats_ema['acc1']:.1f}%")
                 if max_accuracy_ema < test_stats_ema["acc1"]:
                     max_accuracy_ema = test_stats_ema["acc1"]
