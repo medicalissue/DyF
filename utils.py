@@ -170,7 +170,9 @@ class MetricLogger(object):
 
 class TensorboardLogger(object):
     def __init__(self, log_dir):
-        self.writer = SummaryWriter(logdir=log_dir)
+        # `logdir=` was renamed to `log_dir=` in tensorboard >= 2.x;
+        # DyT was written against the older keyword. Use the modern name.
+        self.writer = SummaryWriter(log_dir=log_dir)
         self.step = 0
 
     def set_step(self, step=None):
