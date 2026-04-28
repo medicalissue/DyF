@@ -53,8 +53,12 @@ step() {
     local name="$1"; shift
     local logfile="${LOGDIR}/${name}.log"
     echo "[bootstrap] ▶ $name"
-    if ! "$@" > "$logfile" 2>&1; then
-        local rc=$?
+    # Capture rc immediately — `local rc=$?` inside `if` would record
+    # `local`'s exit (0), masking the real failure. Same trap with `set
+    # -e`, which we don't use, but keep this idiom anyway.
+    "$@" > "$logfile" 2>&1
+    local rc=$?
+    if (( rc != 0 )); then
         echo "[bootstrap] ✗ $name failed (rc=$rc). Last 40 lines of $logfile:"
         tail -40 "$logfile"
         return $rc
@@ -107,11 +111,23 @@ else
 fi
 
 # ── 3. Install Python deps ───────────────────────────────────────
-# AWS DL AMI ships with PyTorch + CUDA. We add the small set of project
-# extras: timm (model zoo + LayerNorm2d), wandb (logging), pyyaml +
-# awscli (orchestrate.sh helpers).
+# AWS DL AMI ships with PyTorch + CUDA + python3, but no `python`
+# symlink. Install one so orchestrate.sh / dryrun.sh / yaml_to_args.py
+# all just call `python` like locally.
+if ! command -v python >/dev/null 2>&1; then
+    py=$(command -v python3 || true)
+    if [[ -n "$py" ]]; then
+        echo "[bootstrap] symlinking $py → /usr/local/bin/python"
+        ln -sf "$py" /usr/local/bin/python
+    else
+        die "no python3 found on this AMI" 7
+    fi
+fi
+# Install the small set of project extras the AMI doesn't ship. timm
+# is required by main.py so this MUST succeed — making it fatal saves
+# us from a confusing rc=127 chain inside orchestrate.sh.
 step pip-install python -m pip install --quiet --upgrade \
-    timm wandb pyyaml awscli || echo "[bootstrap] pip-install non-fatal — continuing"
+    timm wandb pyyaml awscli || die "pip-install failed" 8
 
 # ── 4. Orchestrate ────────────────────────────────────────────────
 : "${ENTRY_SCRIPT:=scripts/orchestrate.sh}"
