@@ -124,52 +124,56 @@ fi
 
 # ── 3. Install Python env ────────────────────────────────────────
 # AWS DL Base AMI gives us NVIDIA driver + CUDA but NOT PyTorch. We
-# fetch the pre-built venv tarball NELU uses — it already has Python
-# 3.10 + torch (cu130) + timm + wandb + everything our trainer needs.
-# Skip if the venv already exists (from a previous bootstrap on the
-# same root volume — rare on spot, but cheap to check).
-if [[ -x "${VENV_ROOT}/bin/python" ]]; then
+# fetch the pre-built venv tarball NELU uses (it has Python 3.10 +
+# torch + timm + wandb + everything). Two gotchas baked into that
+# tarball that we have to work around:
+#
+#   (a) the venv was built at /opt/nelu-venv, and `bin/activate` has
+#       that path HARD-CODED. Renaming the directory breaks PATH.
+#       Workaround: leave the directory at /opt/nelu-venv, don't
+#       try to rename to our project name.
+#
+#   (b) the venv ships only a `python3.10` binary in bin/, no `python`
+#       symlink. After activate, the PATH lookup falls through to
+#       /usr/bin/python3 (system) and `python` is missing entirely.
+#       Workaround: make the symlink ourselves before activating.
+VENV_ROOT=/opt/nelu-venv
+
+if [[ -x "${VENV_ROOT}/bin/python3.10" || -x "${VENV_ROOT}/bin/python3" ]]; then
     echo "[bootstrap] reusing existing ${VENV_ROOT}"
 else
     step fetch-venv aws s3 cp "$VENV_S3_URL" /tmp/dyf-venv.tar.gz \
         || die "fetch-venv failed" 4
     step extract-venv bash -c \
-        "mkdir -p \"$(dirname "$VENV_ROOT")\" && \
-         tar xzf /tmp/dyf-venv.tar.gz -C \"$(dirname "$VENV_ROOT")\" && \
-         rm -f /tmp/dyf-venv.tar.gz" \
+        "mkdir -p /opt && tar xzf /tmp/dyf-venv.tar.gz -C /opt && rm -f /tmp/dyf-venv.tar.gz" \
         || die "extract-venv failed" 5
 fi
 
-# The tarball expands to a directory whose name we don't control —
-# detect it. NELU's tarball expands to `nelu-venv-py310-cu130/`; rename
-# to our expected $VENV_ROOT so the activate path is stable.
-if [[ ! -x "${VENV_ROOT}/bin/python" ]]; then
-    parent="$(dirname "$VENV_ROOT")"
-    cand=$(find "$parent" -maxdepth 1 -mindepth 1 -type d -name '*venv*' \
-           -not -path "$VENV_ROOT" 2>/dev/null | head -1)
-    if [[ -n "$cand" && -x "$cand/bin/python" ]]; then
-        echo "[bootstrap] renaming $cand → $VENV_ROOT"
-        mv "$cand" "$VENV_ROOT"
-    else
-        die "venv tarball extracted but no python found under $parent" 6
+# Make sure `python` exists in the venv bin/. NELU's venv only has
+# python3.10; without this symlink, every script calling bare `python`
+# (orchestrate.sh, yaml_to_args.py, dryrun.sh) crashes.
+if [[ ! -e "${VENV_ROOT}/bin/python" ]]; then
+    if [[ -x "${VENV_ROOT}/bin/python3.10" ]]; then
+        ln -sf python3.10 "${VENV_ROOT}/bin/python"
+    elif [[ -x "${VENV_ROOT}/bin/python3" ]]; then
+        ln -sf python3 "${VENV_ROOT}/bin/python"
     fi
 fi
 
-# Activate the venv globally so all downstream scripts (orchestrate.sh,
-# torchrun, etc.) inherit it. Source instead of just adding to PATH so
-# `python -m pip install` lands inside the venv site-packages.
+# Activate the venv. PATH-prepend, sourced so child shells inherit it.
 # shellcheck disable=SC1090
 source "${VENV_ROOT}/bin/activate"
 
-# Sanity: torch + torchrun must be importable now.
+# Sanity: torch + torchrun must work from the activated venv.
 step verify-env python -c \
     "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())" \
     || die "torch import failed in venv" 7
 command -v torchrun >/dev/null 2>&1 || die "torchrun not on PATH after venv activate" 8
 
 # Top-up: pyyaml + awscli are tiny and may have been pinned in the
-# venv. Install awscli into venv so orchestrate.sh's `aws s3 cp` works
-# from this Python. Make this non-fatal — the AMI usually has aws too.
+# venv. Install into venv so orchestrate.sh's helpers don't fall back
+# to the system Python (which has no torch). Non-fatal — both are
+# usually present already.
 python -m pip install --quiet --upgrade pyyaml awscli >/dev/null 2>&1 || true
 
 # ── 4. Orchestrate ────────────────────────────────────────────────
