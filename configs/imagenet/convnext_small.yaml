@@ -1,0 +1,13 @@
+include: ../_base.yaml
+
+model: convnext_small
+batch_size: 64
+update_freq: 8              # 64 × 8 GPUs × 8 = 4096
+drop_path: 0.4              # ConvNeXt paper, Small recipe
+layer_scale_init_value: 1.0e-6
+head_init_scale: 1.0
+layer_decay: 1.0
+clip_grad: null
+model_ema: true
+model_ema_decay: 0.9999
+model_ema_eval: true

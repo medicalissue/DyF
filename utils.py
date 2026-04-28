@@ -7,6 +7,7 @@
 
 
 import os
+import json
 import math
 import time
 from collections import defaultdict, deque
@@ -204,12 +205,40 @@ class WandbLogger(object):
                 "Run `pip install wandb` to install it."
             )
 
-        # Initialize a W&B run 
+        # Resume the same W&B run across spot preemption: orchestrate.sh
+        # syncs ``wandb_run_id.json`` with the rest of the run state, so
+        # a stolen lease lands here with the previous run id on disk.
+        # Without resume= W&B would create a fresh run on every pause.
+        run_id = None
+        sidecar = os.path.join(args.output_dir, 'wandb_run_id.json') \
+            if getattr(args, 'output_dir', '') else ''
+        if sidecar and os.path.isfile(sidecar):
+            try:
+                with open(sidecar, 'r', encoding='utf-8') as f:
+                    run_id = json.load(f).get('run_id')
+            except (OSError, ValueError):
+                run_id = None
+
         if self._wandb.run is None:
-            self._wandb.init(
+            init_kwargs = dict(
                 project=args.project,
-                config=args
+                config=args,
             )
+            if run_id:
+                init_kwargs['id'] = run_id
+                init_kwargs['resume'] = 'allow'
+            self._wandb.init(**init_kwargs)
+
+        # Persist the (possibly newly-minted) run id so the next worker
+        # can re-attach. Master-only file write — no DDP coordination
+        # needed because WandbLogger is only constructed on rank 0.
+        if sidecar and self._wandb.run is not None:
+            try:
+                os.makedirs(os.path.dirname(sidecar), exist_ok=True)
+                with open(sidecar, 'w', encoding='utf-8') as f:
+                    json.dump({'run_id': self._wandb.run.id}, f)
+            except OSError:
+                pass
 
     def log_epoch_metrics(self, metrics, commit=True):
         """

@@ -1,0 +1,51 @@
+# One DyF worker. A worker VM boots once, attaches a fresh EBS volume
+# from the dataset snapshot, then loops through the S3 job queue until
+# every experiment has a completion sentinel. Submit multiple copies
+# (with different --name) to run workers in parallel.
+#
+# Launch example:
+#   source .env
+#   dstack apply -f .dstack/worker.dstack.yml -n dyf-worker-1 -y -d
+#
+# Or use scripts/launch_workers.sh for N workers.
+#
+# Layout matches NELU's: bootstrap.sh attaches /dev/sdg → mounts /data
+# read-only (the EBS volume is provisioned in-place from $DATA_SNAPSHOT
+# via run_worker.sh's BlockDeviceMappings, OR by dstack itself when
+# launched through this task — the mount logic in bootstrap.sh handles
+# both paths).
+#
+# Requires the nelu-worker-profile instance profile (S3 R/W, EBS lifecycle,
+# self-terminate) — DyF reuses it because s3://nelu-checkpoints/dyf/*
+# is covered by the existing policy.
+
+type: task
+name: dyf-worker
+image: nvcr.io/nvidia/pytorch:24.08-py3
+
+# --privileged lets bootstrap.sh mount the EBS volume itself.
+privileged: true
+
+repos:
+  - .:/workspace
+working_dir: /workspace
+
+resources:
+  gpu: H100:8
+  shm_size: 64GB
+  disk: 256GB
+
+env:
+  - DATA_SNAPSHOT=snap-0adfaa42ce378623c
+  - CKPT_BUCKET=s3://nelu-checkpoints/dyf
+  - AWS_DEFAULT_REGION=us-west-2
+  - WANDB_PROJECT=dyf
+  - WANDB_ENTITY
+  - WANDB_API_KEY
+
+commands:
+  # Hand off to bootstrap.sh — it mounts /data from the EBS volume
+  # (resolved via IMDSv2), installs the small set of pip deps the NGC
+  # base doesn't ship, and exec's orchestrate.sh. Same flow as the
+  # bare-EC2 path, so behavior matches between launch modes.
+  - bash scripts/bootstrap.sh

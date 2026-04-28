@@ -17,6 +17,25 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 import json
 import os
+import signal
+
+
+# Graceful preempt: orchestrate.sh's preempt watcher delivers SIGTERM to
+# the trainer's process group on AWS spot/instance-action. We flip a
+# flag and let the current epoch finish; main()'s loop checks the flag
+# at the top of each epoch and breaks out so the latest checkpoint
+# (already written by save_model) is the resume point.
+_PREEMPT_REQUESTED = False
+
+
+def _request_preempt(signum, _frame):
+    global _PREEMPT_REQUESTED
+    _PREEMPT_REQUESTED = True
+    print(f"[main] caught signal {signum} — will exit after current epoch", flush=True)
+
+
+signal.signal(signal.SIGTERM, _request_preempt)
+signal.signal(signal.SIGINT, _request_preempt)
 
 from pathlib import Path
 
@@ -33,6 +52,7 @@ from utils import NativeScalerWithGradNormCount as NativeScaler
 import utils
 
 from dynamic_tanh import convert_ln_to_dyt
+from dynamic_floor import convert_ln_to_dyf
 
 
 def str2bool(v):
@@ -204,6 +224,21 @@ def get_args_parser():
     
     parser.add_argument('--dynamic_tanh', type=str2bool, default=False)
 
+    # ── Dynamic Floor (DyF) ──────────────────────────────────────────
+    # f_a(u) = ψ(u-a) + a, with ψ ∈ {SiLU, GELU, ReLU(=hard)}.
+    # γ, β are per-channel; `a` is a scalar shared across channels.
+    parser.add_argument('--dynamic_floor', type=str2bool, default=False,
+                        help='Replace LayerNorm with DyF (Dynamic Floor)')
+    parser.add_argument('--dyf_kernel', type=str, default='silu',
+                        choices=['silu', 'gelu', 'hard'],
+                        help='ψ kernel: silu, gelu, or hard (max(a,u))')
+    parser.add_argument('--dyf_hard', type=str2bool, default=False,
+                        help='[deprecated] equivalent to --dyf_kernel hard')
+    parser.add_argument('--dyf_a_init', type=float, default=0.0,
+                        help='Initial saturation floor a (scalar)')
+    parser.add_argument('--dyf_gamma_init', type=float, default=1.0)
+    parser.add_argument('--dyf_beta_init', type=float, default=0.0)
+
     return parser
 
 def main(args):
@@ -300,8 +335,19 @@ def main(args):
     else:
         raise ValueError(f"Unrecognized model: {args.model}")
 
+    if args.dynamic_tanh and args.dynamic_floor:
+        raise ValueError("Pass at most one of --dynamic_tanh / --dynamic_floor")
     if args.dynamic_tanh:
         model = convert_ln_to_dyt(model)
+    if args.dynamic_floor:
+        kernel = 'hard' if args.dyf_hard else args.dyf_kernel
+        model = convert_ln_to_dyf(
+            model,
+            kernel=kernel,
+            a_init=args.dyf_a_init,
+            gamma_init=args.dyf_gamma_init,
+            beta_init=args.dyf_beta_init,
+        )
 
     if args.finetune:
         if args.finetune.startswith('https'):
@@ -412,6 +458,9 @@ def main(args):
     print("Start training for %d epochs" % args.epochs)
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
+        if _PREEMPT_REQUESTED:
+            print("[main] preempt requested — stopping before epoch %d" % epoch, flush=True)
+            break
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
         if log_writer is not None:

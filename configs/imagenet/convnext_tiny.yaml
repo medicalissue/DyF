@@ -1,0 +1,13 @@
+# ConvNeXt-Tiny / ImageNet-1k. Base recipe matches DyT paper Table 1.
+include: ../_base.yaml
+
+model: convnext_tiny
+batch_size: 128             # 128 × 8 GPUs × update_freq 4 = 4096 effective
+update_freq: 4
+drop_path: 0.1
+layer_scale_init_value: 1.0e-6
+head_init_scale: 1.0
+clip_grad: null
+model_ema: true
+model_ema_decay: 0.9999
+model_ema_eval: true

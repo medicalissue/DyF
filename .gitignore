@@ -1,0 +1,25 @@
+# Local secrets — never commit
+.env
+.env.local
+.env.*.bak
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Local artifacts
+checkpoints/
+logs/
+runs/
+wandb/
+*.pth
+*.pth.tar
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

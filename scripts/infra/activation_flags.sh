@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Map a normalization variant name → main.py CLI flags.
+#
+# Used by orchestrate.sh and dryrun.sh. Single source of truth so that
+# adding a new variant (e.g. dyf-large-a-init) is one case-arm here, not
+# an N-place edit across every launcher.
+#
+# Variants:
+#   ln              baseline LayerNorm (no swap)
+#   dyt             DynamicTanh (DyT paper)
+#   dyf-silu        DyF, ψ = SiLU,  a=0 init  (≡ Swish-floor at init)
+#   dyf-gelu        DyF, ψ = GELU,  a=0 init  (≡ GELU-floor at init)
+#   dyf-hard        DyF, ψ = ReLU,  a=0 init  (≡ ReLU at init)
+#   dyf-silu-aneg   ψ=SiLU, a=-1.0  (probe (C3): negative-tail floor)
+#   dyf-silu-apos   ψ=SiLU, a=+0.5
+#   dyf-gelu-aneg   ψ=GELU, a=-1.0
+#   dyf-gelu-apos   ψ=GELU, a=+0.5
+#
+# Aliases: `dyf` ≡ `dyf-silu` (default kernel matches spec §2.2 Swish-floor).
+
+activation_flags() {
+    local act="$1"
+    case "$act" in
+        ln)
+            printf '%s' "--dynamic_tanh false --dynamic_floor false"
+            ;;
+        dyt)
+            printf '%s' "--dynamic_tanh true  --dynamic_floor false"
+            ;;
+        dyf|dyf-silu)
+            printf '%s' "--dynamic_tanh false --dynamic_floor true --dyf_kernel silu --dyf_a_init 0.0"
+            ;;
+        dyf-gelu)
+            printf '%s' "--dynamic_tanh false --dynamic_floor true --dyf_kernel gelu --dyf_a_init 0.0"
+            ;;
+        dyf-hard)
+            printf '%s' "--dynamic_tanh false --dynamic_floor true --dyf_kernel hard --dyf_a_init 0.0"
+            ;;
+        dyf-silu-aneg)
+            printf '%s' "--dynamic_tanh false --dynamic_floor true --dyf_kernel silu --dyf_a_init -1.0"
+            ;;
+        dyf-silu-apos)
+            printf '%s' "--dynamic_tanh false --dynamic_floor true --dyf_kernel silu --dyf_a_init 0.5"
+            ;;
+        dyf-gelu-aneg)
+            printf '%s' "--dynamic_tanh false --dynamic_floor true --dyf_kernel gelu --dyf_a_init -1.0"
+            ;;
+        dyf-gelu-apos)
+            printf '%s' "--dynamic_tanh false --dynamic_floor true --dyf_kernel gelu --dyf_a_init 0.5"
+            ;;
+        *)
+            echo "ERROR: unknown activation '$act'." \
+                "Valid: ln dyt dyf dyf-silu dyf-gelu dyf-hard" \
+                "dyf-silu-{aneg,apos} dyf-gelu-{aneg,apos}" >&2
+            return 2
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    activation_flags "$@"
+fi

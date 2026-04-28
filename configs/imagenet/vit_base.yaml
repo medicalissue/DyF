@@ -1,0 +1,11 @@
+# ViT-Base/16 — primary target for prediction (C5).
+include: ../_base.yaml
+
+model: vit_base_patch16_224
+batch_size: 128             # 128 × 8 × 4 = 4096
+update_freq: 4
+drop_path: 0.1
+clip_grad: 1.0
+model_ema: true
+model_ema_decay: 0.9999
+model_ema_eval: false

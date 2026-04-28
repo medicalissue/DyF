@@ -1,0 +1,39 @@
+# DyF training campaign — primary job order.
+#
+# Format: one "<config>:<activation>" pair per line. Lines starting
+# with '#' and blank lines are ignored. Order = priority (top first).
+#
+# Activations defined in scripts/infra/activation_flags.sh:
+#   ln dyt
+#   dyf-silu dyf-gelu dyf-hard
+#   dyf-silu-{aneg,apos} dyf-gelu-{aneg,apos}
+#
+# Mapping to predictions (see README §"Predictions"):
+#   (C1) DyF ≈ LN, DyT on pre-norm  → ln, dyt, dyf-silu, dyf-gelu, dyf-hard
+#   (C3) `a` ↔ input lower-tail      → *-aneg, *-apos rows
+#   (C5) ViT-B / ImageNet-1K table  → vit_base.yaml rows
+
+# ── ViT-Base / ImageNet-1k (primary, prediction C5) ────────────────
+configs/imagenet/vit_base.yaml:ln
+configs/imagenet/vit_base.yaml:dyt
+configs/imagenet/vit_base.yaml:dyf-silu
+configs/imagenet/vit_base.yaml:dyf-gelu
+configs/imagenet/vit_base.yaml:dyf-hard
+
+# ── ConvNeXt-Tiny (cross-arch generalization, prediction C1) ───────
+configs/imagenet/convnext_tiny.yaml:ln
+configs/imagenet/convnext_tiny.yaml:dyt
+configs/imagenet/convnext_tiny.yaml:dyf-silu
+configs/imagenet/convnext_tiny.yaml:dyf-gelu
+configs/imagenet/convnext_tiny.yaml:dyf-hard
+
+# ── ConvNeXt-Small (scale check) ───────────────────────────────────
+configs/imagenet/convnext_small.yaml:ln
+configs/imagenet/convnext_small.yaml:dyf-silu
+configs/imagenet/convnext_small.yaml:dyf-gelu
+
+# ── a_init ablation on ViT-Base (prediction C3) ────────────────────
+configs/imagenet/vit_base.yaml:dyf-silu-aneg
+configs/imagenet/vit_base.yaml:dyf-silu-apos
+configs/imagenet/vit_base.yaml:dyf-gelu-aneg
+configs/imagenet/vit_base.yaml:dyf-gelu-apos
