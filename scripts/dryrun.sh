@@ -16,7 +16,13 @@ cd "$REPO_ROOT"
 
 DATA_DIR="${DATA_DIR:-/tmp/dyf_dryrun_data}"
 OUT_ROOT="${OUT_ROOT:-/tmp/dyf_dryrun_out}"
-ACTIVATIONS=("${@:-ln dyt dyf dyf-hard}")
+# Default: cover all swap variants. Pass args to restrict, e.g.
+#     bash scripts/dryrun.sh dyf-silu
+if (( $# > 0 )); then
+    ACTIVATIONS=("$@")
+else
+    ACTIVATIONS=(ln dyt dyf-silu dyf-gelu dyf-hard)
+fi
 
 # 1) Build fake dataset (10 classes × 4 images each).
 if [[ ! -d "$DATA_DIR/train/cls0" ]]; then
@@ -41,7 +47,7 @@ fi
 source "$REPO_ROOT/scripts/infra/activation_flags.sh"
 
 # 3) Run each activation variant.
-for act in $ACTIVATIONS; do
+for act in "${ACTIVATIONS[@]}"; do
     out="$OUT_ROOT/$act"
     mkdir -p "$out"
     echo
@@ -56,13 +62,19 @@ for act in $ACTIVATIONS; do
     # CPU single-process: skip torchrun, run main.py directly. main.py
     # calls init_distributed_mode which short-circuits sensibly when
     # WORLD_SIZE/RANK env vars are unset.
+    #
+    # data_set=image_folder means data_path → train ImageFolder root,
+    # eval_data_path → val ImageFolder root (datasets.py:39). The fake
+    # data was generated with class subdirs directly under
+    # $DATA_DIR/{train,val}, so we point at those.
     # shellcheck disable=SC2086
     python "$REPO_ROOT/main.py" \
         $cfg_args $act_args \
-        --data_path "$DATA_DIR" \
+        --data_path "$DATA_DIR/train" \
+        --eval_data_path "$DATA_DIR/val" \
         --output_dir "$out" \
         --device "${DEVICE:-cpu}" \
-        2>&1 | tail -40
+        2>&1 | tail -30
 done
 
 echo

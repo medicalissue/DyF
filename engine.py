@@ -82,7 +82,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 if model_ema is not None:
                     model_ema.update(model)
 
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
 
         if mixup_fn is None:
             class_acc = (output.max(-1)[-1] == targets).float().mean()
