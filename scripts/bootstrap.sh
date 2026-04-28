@@ -76,35 +76,42 @@ mount_data() {
     if mountpoint -q /data; then
         echo "[bootstrap] /data already mounted"; return 0
     fi
-    # NVMe remaps /dev/sdg → /dev/nvme*n1; pick by serial (volume-id) or
-    # fallback to the 500GB-class disk that isn't the root.
-    local token vol_id dev=""
-    token=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" \
-            -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null || true)
-    vol_id=$(curl -sS -H "X-aws-ec2-metadata-token: $token" \
-             "http://169.254.169.254/latest/meta-data/block-device-mapping/ebs1" \
-             2>/dev/null || true)
-    local serial_nodash="${vol_id//-/}"
+    # The data volume is the EBS disk attached as /dev/sdg — but NVMe
+    # remaps sdg to /dev/nvme*n1 in unpredictable enumeration order, and
+    # some p5 AMIs return only the device-name (not vol-id) from the
+    # IMDS block-device-mapping path. We pick by structural properties:
+    #
+    #   - is an nvme disk (lsblk TYPE=disk)
+    #   - has SERIAL starting with "vol" (EBS, not "AWS…" instance store)
+    #   - has NO mounted partition and is NOT the root device
+    #
+    # That uniquely matches the dataset volume on every p5/g5 AMI we've
+    # seen, regardless of NVMe ordering.
+    local dev="" root_disk
+    root_disk=$(findmnt -no SOURCE / | sed -E 's|p?[0-9]+$||')   # /dev/nvme0n1
     for _ in {1..30}; do
-        if [[ -n "$vol_id" ]]; then
-            dev=$(lsblk -dno NAME,SERIAL | awk -v a="$serial_nodash" -v b="$vol_id" \
-                  '$2==a || $2==b {print "/dev/"$1; exit}')
-        fi
-        if [[ -z "$dev" ]]; then
-            # Heuristic: any nvme disk ≥ 100G that isn't the root.
-            dev=$(lsblk -dno NAME,SIZE,TYPE | awk \
-                '$3=="disk" && ($2 ~ /^[1-9][0-9][0-9]G$/ || $2 ~ /T$/) {print "/dev/"$1; exit}')
-        fi
+        # List nvme disks; for each, check serial prefix and skip root.
+        while read -r name serial; do
+            local devpath="/dev/$name"
+            [[ "$devpath" == "$root_disk" ]] && continue
+            [[ "$serial" != vol* ]] && continue
+            # Skip if any partition exists or it's already mounted.
+            if lsblk -no MOUNTPOINT "$devpath" | grep -qE '\S'; then
+                continue
+            fi
+            dev="$devpath"
+            break
+        done < <(lsblk -dno NAME,SERIAL,TYPE | awk '$3=="disk" {print $1, $2}')
         [[ -n "$dev" ]] && break
         sleep 1
     done
-    [[ -z "$dev" ]] && die "could not resolve /data device" 2
+    [[ -z "$dev" ]] && die "could not resolve /data device (no unmounted EBS disk found)" 2
     echo "[bootstrap] mounting $dev at /data (ro)"
     mkdir -p /data
     mount -o ro "$dev" /data || die "mount $dev /data failed" 3
     df -h /data
 }
-mount_data || echo "[bootstrap] /data mount skipped — orchestrate.sh will warn"
+mount_data || die "/data mount failed — refusing to continue without dataset" 9
 
 # ── 2. Clone repo ─────────────────────────────────────────────────
 if [[ -d "$WORKSPACE/.git" ]]; then
