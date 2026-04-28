@@ -14,6 +14,23 @@ from timm.utils import accuracy, ModelEma
 
 import utils
 
+def _unwrap(model):
+    """Strip DDP / torch.compile wrappers so EMA sees raw param keys.
+
+    timm's ModelEma was instantiated against the un-wrapped model, so its
+    state_dict has bare keys like 'cls_token'. Calling update(model) on
+    the wrapped object would look for 'module.cls_token' (DDP) or
+    '_orig_mod.cls_token' (compile) and KeyError. Peel both layers.
+    """
+    m = model
+    while hasattr(m, 'module') or hasattr(m, '_orig_mod'):
+        if hasattr(m, 'module'):
+            m = m.module
+        elif hasattr(m, '_orig_mod'):
+            m = m._orig_mod
+    return m
+
+
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
@@ -26,6 +43,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     # the inner loop just branches on `use_scaler`.
     autocast_dtype = torch.bfloat16 if amp_dtype == 'bfloat16' else torch.float16
     use_scaler = use_amp and amp_dtype != 'bfloat16'
+    ema_target = _unwrap(model) if model_ema is not None else None
     model.train(True)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -80,7 +98,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             if (data_iter_step + 1) % update_freq == 0:
                 optimizer.zero_grad()
                 if model_ema is not None:
-                    model_ema.update(model)
+                    model_ema.update(ema_target)
         else:
             # bf16 (use_amp=True) and full-precision paths share the same
             # plain backward + step logic — the autocast context above
@@ -94,7 +112,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 optimizer.step()
                 optimizer.zero_grad()
                 if model_ema is not None:
-                    model_ema.update(model)
+                    model_ema.update(ema_target)
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
