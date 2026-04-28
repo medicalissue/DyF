@@ -170,10 +170,12 @@ step verify-env python -c \
     || die "torch import failed in venv" 7
 command -v torchrun >/dev/null 2>&1 || die "torchrun not on PATH after venv activate" 8
 
-# Top-up: pyyaml + awscli are tiny and may have been pinned in the
-# venv. Install into venv so orchestrate.sh's helpers don't fall back
-# to the system Python (which has no torch). Non-fatal — both are
-# usually present already.
+# Top-up: tensorboard is required by utils.py's SummaryWriter import
+# (DyT inherited that from ConvNeXt). NELU's venv doesn't ship it
+# because NELU never wrote TB events. Make it required (fatal on miss).
+# pyyaml + awscli are tiny and usually present; non-fatal.
+step pip-tensorboard python -m pip install --quiet --upgrade tensorboard \
+    || die "pip install tensorboard failed" 9
 python -m pip install --quiet --upgrade pyyaml awscli >/dev/null 2>&1 || true
 
 # ── 4. Orchestrate ────────────────────────────────────────────────

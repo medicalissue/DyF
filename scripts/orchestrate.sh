@@ -316,24 +316,56 @@ run_job() {
 
     lease_release "$exp"
     rm -rf "$outdir"
-    return 0
+    # Surface the trainer rc to the outer loop so it can break out of
+    # a fast-failing job rather than relaunch torchrun in a tight loop.
+    # 0 = success/preempt-pause (will resume next pass), nonzero = real fail.
+    return "$trainer_rc"
 }
 
 # ── Main ───────────────────────────────────────────────────────────
 check_data_mount
 start_preempt_watcher
 
+# Per-job consecutive-failure count. After MAX_FAILS_PER_JOB crashes
+# in a row on the same exp, skip it for the rest of this worker's life
+# rather than burn spot $ relaunching torchrun in a tight loop. The
+# next worker (different VM) will give the job a fresh try.
+: "${MAX_FAILS_PER_JOB:=2}"
+declare -A fail_count
+
 idle_passes=0
 while (( idle_passes < MAX_IDLE_PASSES )); do
     ran_any=0
     for pair in $JOB_ORDER; do
         IFS=: read -r cfg act <<<"$pair"
+        exp=$(exp_key "$cfg" "$act")
+        # rc encoding from run_job:
+        #   0           = clean (success or preempt-pause, sentinel may exist)
+        #   2           = lease held by someone else (skip)
+        #   3           = already complete (skip)
+        #   anything else = trainer crashed
+        if (( ${fail_count[$exp]:-0} >= MAX_FAILS_PER_JOB )); then
+            log "skip $exp (failed ${fail_count[$exp]}× already, blacklisted on this worker)"
+            continue
+        fi
         rc=0
         run_job "$cfg" "$act" || rc=$?
-        # rc=0 ⇒ trainer actually ran (counts as work).
-        # rc=2 (lease) and rc=3 (complete) MUST NOT reset idle counter,
-        # otherwise a fully-drained queue loops forever burning spot $.
-        [[ $rc -eq 0 ]] && ran_any=1
+        case $rc in
+            0)
+                ran_any=1
+                fail_count[$exp]=0
+                ;;
+            2|3)
+                # Skip-paths must NOT reset the idle counter or a drained
+                # queue would loop forever burning spot $.
+                ;;
+            *)
+                # Trainer ran but crashed — count the work AND the failure.
+                ran_any=1
+                fail_count[$exp]=$(( ${fail_count[$exp]:-0} + 1 ))
+                log "  consecutive failures on $exp: ${fail_count[$exp]}/${MAX_FAILS_PER_JOB}"
+                ;;
+        esac
     done
     if (( ran_any == 0 )); then
         idle_passes=$((idle_passes + 1))
