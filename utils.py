@@ -520,7 +520,14 @@ def auto_load_model(args, model, model_without_ddp, optimizer, loss_scaler, mode
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            # weights_only=False because save_model() stashes the
+            # argparse.Namespace (`args`) into the checkpoint — modern
+            # PyTorch defaults to weights_only=True which refuses any
+            # non-tensor python object. Our checkpoints are produced by
+            # the same trainer that loads them, so the trust assumption
+            # is fine.
+            checkpoint = torch.load(args.resume, map_location='cpu',
+                                    weights_only=False)
         model_without_ddp.load_state_dict(checkpoint['model'])
         print("Resume checkpoint %s" % args.resume)
         if 'optimizer' in checkpoint and 'epoch' in checkpoint:
