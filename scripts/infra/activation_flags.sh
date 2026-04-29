@@ -53,11 +53,16 @@ activation_flags() {
         # f'(0) = 1 (K=4 for dsilu, K=√(2π) for dgelu). a is per-site
         # input scale; sqrt schedule sets a_l = sqrt(l+1) to track
         # pre-LN residual stream std growth.
+        # γ_init values chosen so DyS output std = 1.0 when input is
+        # N(0, σ_l²) and a_l = σ_l (the sqrt schedule). σ of dsilu(u) at
+        # u~N(0,1) ≈ 0.615 → γ = 1.626 keeps output unit-variance and
+        # mimics LN's signal-preserving residual dynamics.
+        # σ of dgelu(u) at u~N(0,1) ≈ 0.439 → γ = 2.279.
         dys-dgelu)
-            printf '%s' "--dynamic_saturation true --dys_kernel dgelu --dys_a_init 1.0 --dys_a_init_schedule sqrt"
+            printf '%s' "--dynamic_saturation true --dys_kernel dgelu --dys_a_init 1.0 --dys_a_init_schedule sqrt --dys_gamma_init 2.279"
             ;;
         dys-dsilu)
-            printf '%s' "--dynamic_saturation true --dys_kernel dsilu --dys_a_init 1.0 --dys_a_init_schedule sqrt"
+            printf '%s' "--dynamic_saturation true --dys_kernel dsilu --dys_a_init 1.0 --dys_a_init_schedule sqrt --dys_gamma_init 1.626"
             ;;
         *)
             echo "ERROR: unknown activation '$act'." \
