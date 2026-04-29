@@ -1,22 +1,28 @@
 """DyS: Dynamic Saturation — bounded element-wise norm replacement.
 
-Two kernels share the form  g(u) = u · h(u)  where h(u) is an S-curve's
-derivative ("bell"):
+Two kernels share the form  g(u) = u · K · h(u)  where h is an S-curve's
+derivative ("bell") and K is a constant chosen so g'(0) = 1 (i.e. g(u)
+≈ u near zero, like identity). This makes init time near-LN-like:
+unit-std input passes through ~unchanged in the transition region, with
+saturation only kicking in for |u| > ~1.
 
-    dsilu:  g(u) = u · σ(u)·(1 - σ(u))      — sigmoid bell × identity
-                                               σ' = σ(1-σ)
-    dgelu:  g(u) = u · φ(u)                  — Gaussian bell × identity
-                                               φ(u) = (2π)^(-1/2)·exp(-u²/2)
+    dsilu:  g(u) = 4 · u · σ(u)·(1 - σ(u))
+                   ↑ K=1/σ'(0) = 4
+    dgelu:  g(u) = √(2π) · u · φ(u)
+                   ↑ K=1/φ(0) = √(2π) ≈ 2.5066
 
-Both are odd, bounded, decay to 0 in BOTH tails. The naming refers to
-which S-curve's derivative provides the bell:
-    dsilu ↔ derivative of sigmoid (peak 0.25 at u=0 for σ', then ×u)
-    dgelu ↔ derivative of erf-based CDF (= φ, the std normal PDF, then ×u)
+Both are odd, bounded, decay to 0 in BOTH tails:
+    dsilu peak |g| ≈ 0.895 at |u| ≈ 1.54
+    dgelu peak |g| ≈ 0.607 at |u| ≈ 1.00  (= 1/e)
 
-Note: this is NOT the full d/du[GELU(u)] = Φ(u) + u·φ(u), which is
-unbounded (→ u for large u). We deliberately drop the Φ(u) "DC" term
-to keep g(u) bounded in both tails — that's what gives DyS its
-saturation character vs DyF's positive-unbounded.
+The constant K is mathematically redundant with γ (γ' = γ·K) but
+makes init clean: γ_init=1.0 then means "near-identity at unit std",
+which is the same starting condition LayerNorm gets. Without K, you'd
+need γ_init=4 (silu) / γ_init=√(2π) (gelu) — awkward.
+
+Note: dgelu kernel u · φ(u) is NOT the full d/du[GELU(u)] = Φ(u) +
+u·φ(u). We drop Φ(u) so g stays bounded (→ 0) in both tails — that's
+what gives DyS its saturation character vs DyF's positive-unbounded.
 
 The full layer applies a learned scalar `a` as an input-side scale:
 
@@ -46,24 +52,22 @@ from timm.layers import LayerNorm2d
 
 KERNELS = ("dsilu", "dgelu")
 
-# d/du[GELU(u)] = Φ(u) + u · φ(u), where φ(u) = exp(-u²/2)/√(2π).
-# Precise GELU (not the tanh approximation) since we want a sharp,
-# well-defined derivative for the activation.
-_INV_SQRT_2PI = 1.0 / math.sqrt(2.0 * math.pi)
-_INV_SQRT_2 = 1.0 / math.sqrt(2.0)
+# Normalization constants chosen so g'(0) = 1.
+#   dsilu: σ'(0) = 0.25  → multiply by 4
+#   dgelu: φ(0) = 1/√(2π) ≈ 0.399  → multiply by √(2π)
+# These cancel into the inv-pdf factor below: u · 4·σ(1-σ)  and
+# u · √(2π) · (1/√(2π)) · exp(-u²/2)  =  u · exp(-u²/2).
+_K_DSILU = 4.0
 
 
 def _dsilu(u: torch.Tensor) -> torch.Tensor:
     s = torch.sigmoid(u)
-    return u * s * (1.0 - s)
+    return _K_DSILU * u * s * (1.0 - s)
 
 
 def _dgelu(u: torch.Tensor) -> torch.Tensor:
-    # u · φ(u), where φ(u) = (2π)^(-1/2) · exp(-u²/2). The "bell × u"
-    # GELU analog of dsilu. Bounded in both tails (peak |u·φ| ≈ 0.242
-    # at u=±1).
-    pdf = _INV_SQRT_2PI * torch.exp(-0.5 * u * u)
-    return u * pdf
+    # √(2π) · u · φ(u) = u · exp(-u²/2). Same shape, normalized.
+    return u * torch.exp(-0.5 * u * u)
 
 
 class DynamicSaturation(nn.Module):
@@ -139,30 +143,70 @@ def convert_ln_to_dys(
     *,
     kernel: str = "dgelu",
     a_init: float = 1.0,
+    a_init_schedule: str = "constant",
     gamma_init: float = 1.0,
     beta_init: float = 0.0,
 ) -> nn.Module:
-    """Recursively replace every nn.LayerNorm in `module` with DynamicSaturation."""
-    out = module
-    if isinstance(module, nn.LayerNorm):
-        out = DynamicSaturation(
-            module.normalized_shape,
-            channels_last=not isinstance(module, LayerNorm2d),
-            kernel=kernel,
-            a_init=a_init,
-            gamma_init=gamma_init,
-            beta_init=beta_init,
-        )
-    for name, child in module.named_children():
-        out.add_module(
-            name,
-            convert_ln_to_dys(
-                child,
+    """Recursively replace every nn.LayerNorm in `module` with DynamicSaturation.
+
+    a_init_schedule:
+        "constant"  — every site gets a_init (default).
+        "sqrt"      — site k (in residual-stream order) gets
+                      a_init * sqrt(k + 1). Motivation: in pre-LN
+                      transformers Var(x_l) ≈ l + 1, so the input scale
+                      to the l-th norm is sqrt(l+1). Setting a per-site
+                      to that scale puts the input squarely in the
+                      transition region of g(u)=u·K·σ'(u) (which is
+                      meaningful for |u| ≲ 2-3).
+
+    Sites are numbered 0..N-1 in the order they appear during
+    `named_children` recursion. For timm ViT this matches the residual-
+    stream sublayer order: blocks.0.norm1=0, blocks.0.norm2=1, …,
+    blocks.{L-1}.norm2=2L-1, fc_norm=2L.
+    """
+    if a_init_schedule not in ("constant", "sqrt"):
+        raise ValueError(f"a_init_schedule must be 'constant' or 'sqrt', got {a_init_schedule!r}")
+
+    # Pre-pass: count LN sites in deterministic visit order. We do this
+    # before the in-place swap so the index assignment is stable, even
+    # though the swap itself happens during the second pass below.
+    sites: list[str] = []
+
+    def _scan(mod, prefix=""):
+        for name, child in mod.named_children():
+            full = f"{prefix}.{name}" if prefix else name
+            if isinstance(child, nn.LayerNorm):
+                sites.append(full)
+            else:
+                _scan(child, full)
+
+    _scan(module)
+    site_to_idx = {name: i for i, name in enumerate(sites)}
+
+    def _convert(mod, prefix=""):
+        out = mod
+        if isinstance(mod, nn.LayerNorm):
+            # The caller passes us a leaf LN; we don't get the prefix
+            # for the root call, so root LN (rare) gets idx 0 by the
+            # site_to_idx default.
+            full = prefix
+            idx = site_to_idx.get(full, 0)
+            if a_init_schedule == "sqrt":
+                a = a_init * math.sqrt(idx + 1)
+            else:
+                a = a_init
+            out = DynamicSaturation(
+                mod.normalized_shape,
+                channels_last=not isinstance(mod, LayerNorm2d),
                 kernel=kernel,
-                a_init=a_init,
+                a_init=a,
                 gamma_init=gamma_init,
                 beta_init=beta_init,
-            ),
-        )
-    del module
-    return out
+            )
+            return out
+        for name, child in mod.named_children():
+            full = f"{prefix}.{name}" if prefix else name
+            mod.add_module(name, _convert(child, full))
+        return mod
+
+    return _convert(module)

@@ -260,8 +260,13 @@ def get_args_parser():
                         choices=['dsilu', 'dgelu'],
                         help='DyS kernel: dsilu or dgelu')
     parser.add_argument('--dys_a_init', type=float, default=1.0,
-                        help='Initial input scale a (scalar). '
-                             'Default 1.0 puts unit-std input near peak.')
+                        help='Base initial input scale a (scalar). '
+                             'Combined with --dys_a_init_schedule.')
+    parser.add_argument('--dys_a_init_schedule', type=str, default='constant',
+                        choices=['constant', 'sqrt'],
+                        help='constant: every site gets a_init. '
+                             'sqrt: site k gets a_init * sqrt(k+1) — '
+                             'matches pre-LN residual std growth.')
     parser.add_argument('--dys_gamma_init', type=float, default=1.0)
     parser.add_argument('--dys_beta_init', type=float, default=0.0)
 
@@ -380,6 +385,7 @@ def main(args):
             model,
             kernel=args.dys_kernel,
             a_init=args.dys_a_init,
+            a_init_schedule=args.dys_a_init_schedule,
             gamma_init=args.dys_gamma_init,
             beta_init=args.dys_beta_init,
         )

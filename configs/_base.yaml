@@ -68,5 +68,6 @@ dyf_beta_init: 0.0
 dynamic_saturation: false
 dys_kernel: dgelu
 dys_a_init: 1.0
+dys_a_init_schedule: constant
 dys_gamma_init: 1.0
 dys_beta_init: 0.0

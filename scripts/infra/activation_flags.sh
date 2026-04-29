@@ -49,26 +49,21 @@ activation_flags() {
             printf '%s' "--dynamic_tanh false --dynamic_floor true --dyf_kernel gelu --dyf_a_init 0.5"
             ;;
         # ── Dynamic Saturation (DyS) ─────────────────────────────────
-        # g(u) = derivative of S-curve; bounded both tails. a is input
-        # scale (NOT a floor like DyF). Default a=1.0 puts unit-std
-        # input near peak of g.
+        # f(x) = γ · (x/a) · K · σ'(x/a) + β   where K normalises so
+        # f'(0) = 1 (K=4 for dsilu, K=√(2π) for dgelu). a is per-site
+        # input scale; sqrt schedule sets a_l = sqrt(l+1) to track
+        # pre-LN residual stream std growth.
         dys-dgelu)
-            printf '%s' "--dynamic_saturation true --dys_kernel dgelu --dys_a_init 1.0"
+            printf '%s' "--dynamic_saturation true --dys_kernel dgelu --dys_a_init 1.0 --dys_a_init_schedule sqrt"
             ;;
         dys-dsilu)
-            printf '%s' "--dynamic_saturation true --dys_kernel dsilu --dys_a_init 1.0"
-            ;;
-        dys-dgelu-asmall)
-            printf '%s' "--dynamic_saturation true --dys_kernel dgelu --dys_a_init 0.5"
-            ;;
-        dys-dgelu-abig)
-            printf '%s' "--dynamic_saturation true --dys_kernel dgelu --dys_a_init 2.0"
+            printf '%s' "--dynamic_saturation true --dys_kernel dsilu --dys_a_init 1.0 --dys_a_init_schedule sqrt"
             ;;
         *)
             echo "ERROR: unknown activation '$act'." \
                 "Valid: ln dyt dyf dyf-silu dyf-gelu dyf-hard" \
                 "dyf-silu-{aneg,apos} dyf-gelu-{aneg,apos}" \
-                "dys-dgelu dys-dsilu dys-dgelu-{asmall,abig}" >&2
+                "dys-dgelu dys-dsilu" >&2
             return 2
             ;;
     esac
