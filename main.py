@@ -267,6 +267,11 @@ def get_args_parser():
                         help='constant: every site gets a_init. '
                              'sqrt: site k gets a_init * sqrt(k+1) — '
                              'matches pre-LN residual std growth.')
+    parser.add_argument('--dys_a_form', type=str, default='div',
+                        choices=['div', 'mul'],
+                        help='div: u = x/a (default). '
+                             'mul: u = a*x (DyT-α style; safe for a=0 init, '
+                             'no boundary, uniform grad scale).')
     parser.add_argument('--dys_gamma_init', type=float, default=1.0)
     parser.add_argument('--dys_beta_init', type=float, default=0.0)
 
@@ -386,6 +391,7 @@ def main(args):
             kernel=args.dys_kernel,
             a_init=args.dys_a_init,
             a_init_schedule=args.dys_a_init_schedule,
+            a_form=args.dys_a_form,
             gamma_init=args.dys_gamma_init,
             beta_init=args.dys_beta_init,
         )

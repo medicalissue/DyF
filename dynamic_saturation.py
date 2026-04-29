@@ -79,8 +79,11 @@ class DynamicSaturation(nn.Module):
             Used for per-channel γ, β. `a` is scalar regardless.
         channels_last: True for (..., C); False for (N, C, H, W).
         kernel: "dsilu" or "dgelu".
-        a_init: initial scale (scalar). The sqrt-schedule in
-            `convert_ln_to_dys` overrides this on a per-site basis.
+        a_init: initial scale (scalar).
+        a_form: "div" → u = x/a (default, like x/a paper convention)
+                "mul" → u = a·x (DyT-α style; safe for a=0 init,
+                                 grad scale uniform in a, no boundary
+                                 issue at a=0 since g(0)=0 is finite)
         gamma_init, beta_init: per-channel affine init.
     """
 
@@ -90,6 +93,7 @@ class DynamicSaturation(nn.Module):
         channels_last: bool,
         kernel: str = "dgelu",
         a_init: float = 1.0,
+        a_form: str = "div",
         gamma_init: float = 1.0,
         beta_init: float = 0.0,
     ):
@@ -100,7 +104,10 @@ class DynamicSaturation(nn.Module):
         self.channels_last = channels_last
         if kernel not in KERNELS:
             raise ValueError(f"kernel must be one of {KERNELS}, got {kernel!r}")
+        if a_form not in ("div", "mul"):
+            raise ValueError(f"a_form must be 'div' or 'mul', got {a_form!r}")
         self.kernel = kernel
+        self.a_form = a_form
         self.a_init = a_init
         self.gamma_init = gamma_init
         self.beta_init = beta_init
@@ -123,8 +130,11 @@ class DynamicSaturation(nn.Module):
         # erf/exp lose precision near the peak. Cast result back to x's
         # dtype so AMP autocast accounting stays consistent.
         x_fp = x.float()
+        a = self.a.float()
         # `a` is scalar; broadcasts against u of any shape.
-        u = x_fp / self.a.float()
+        # mul form: u = a·x  →  safe for a=0 (DyT-α style)
+        # div form: u = x/a  →  needs a > 0
+        u = x_fp * a if self.a_form == "mul" else x_fp / a
         y = self._kernel(u).to(x.dtype)
         if self.channels_last:
             return y * self.weight + self.bias
@@ -134,8 +144,8 @@ class DynamicSaturation(nn.Module):
         return (
             f"normalized_shape={self.normalized_shape}, "
             f"channels_last={self.channels_last}, kernel={self.kernel}, "
-            f"a_init={self.a_init}, gamma_init={self.gamma_init}, "
-            f"beta_init={self.beta_init}"
+            f"a_form={self.a_form}, a_init={self.a_init}, "
+            f"gamma_init={self.gamma_init}, beta_init={self.beta_init}"
         )
 
 
@@ -145,6 +155,7 @@ def convert_ln_to_dys(
     kernel: str = "dgelu",
     a_init: float = 1.0,
     a_init_schedule: str = "constant",
+    a_form: str = "div",
     gamma_init: float = 1.0,
     beta_init: float = 0.0,
 ) -> nn.Module:
@@ -201,6 +212,7 @@ def convert_ln_to_dys(
                 channels_last=not isinstance(mod, LayerNorm2d),
                 kernel=kernel,
                 a_init=a,
+                a_form=a_form,
                 gamma_init=gamma_init,
                 beta_init=beta_init,
             )

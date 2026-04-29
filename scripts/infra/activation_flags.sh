@@ -68,11 +68,26 @@ activation_flags() {
         dys-dsilu)
             printf '%s' "--dynamic_saturation true --dys_kernel dsilu --dys_a_init 1.0 --dys_a_init_schedule constant --dys_gamma_init 2.000"
             ;;
+        # ── a·x form, a=0 init ────────────────────────────────────────
+        # u = a·x form lets a=0 init be defined (g(0)=0 finite). At
+        # init the layer outputs β (= 0), so the model starts as
+        # near-identity through residual stream + dead DyS. Backward
+        # signal: ∂L/∂a is non-zero (∝ x), so a slowly grows out of 0
+        # during warmup. γ updates are stuck at 0 until a moves
+        # (because g(a·x)=0 → ∂L/∂γ=0). β learns normally.
+        # Risk: model may stay in dead state through warmup → plateau
+        # at random-init loss. Or might wake up and behave like DyT.
+        dys-dgelu-mul-azero)
+            printf '%s' "--dynamic_saturation true --dys_kernel dgelu --dys_a_form mul --dys_a_init 0.0 --dys_a_init_schedule constant --dys_gamma_init 1.0"
+            ;;
+        dys-dsilu-mul-azero)
+            printf '%s' "--dynamic_saturation true --dys_kernel dsilu --dys_a_form mul --dys_a_init 0.0 --dys_a_init_schedule constant --dys_gamma_init 1.0"
+            ;;
         *)
             echo "ERROR: unknown activation '$act'." \
                 "Valid: ln dyt dyf dyf-silu dyf-gelu dyf-hard" \
                 "dyf-silu-{aneg,apos} dyf-gelu-{aneg,apos}" \
-                "dys-dgelu dys-dsilu" >&2
+                "dys-dgelu dys-dsilu dys-d{gelu,silu}-mul-azero" >&2
             return 2
             ;;
     esac
