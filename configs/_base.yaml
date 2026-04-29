@@ -57,7 +57,7 @@ save_ckpt_num: 3
 disable_eval: false
 dist_eval: true
 
-# ── DyF defaults (overridden per activation in launcher) ──────────
+# ── DyF / DyS defaults (overridden per activation in launcher) ────
 dynamic_tanh: false
 dynamic_floor: false
 dyf_kernel: silu
@@ -65,3 +65,8 @@ dyf_hard: false
 dyf_a_init: 0.0
 dyf_gamma_init: 1.0
 dyf_beta_init: 0.0
+dynamic_saturation: false
+dys_kernel: dgelu
+dys_a_init: 1.0
+dys_gamma_init: 1.0
+dys_beta_init: 0.0

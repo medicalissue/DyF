@@ -48,10 +48,27 @@ activation_flags() {
         dyf-gelu-apos)
             printf '%s' "--dynamic_tanh false --dynamic_floor true --dyf_kernel gelu --dyf_a_init 0.5"
             ;;
+        # ── Dynamic Saturation (DyS) ─────────────────────────────────
+        # g(u) = derivative of S-curve; bounded both tails. a is input
+        # scale (NOT a floor like DyF). Default a=1.0 puts unit-std
+        # input near peak of g.
+        dys-dgelu)
+            printf '%s' "--dynamic_saturation true --dys_kernel dgelu --dys_a_init 1.0"
+            ;;
+        dys-dsilu)
+            printf '%s' "--dynamic_saturation true --dys_kernel dsilu --dys_a_init 1.0"
+            ;;
+        dys-dgelu-asmall)
+            printf '%s' "--dynamic_saturation true --dys_kernel dgelu --dys_a_init 0.5"
+            ;;
+        dys-dgelu-abig)
+            printf '%s' "--dynamic_saturation true --dys_kernel dgelu --dys_a_init 2.0"
+            ;;
         *)
             echo "ERROR: unknown activation '$act'." \
                 "Valid: ln dyt dyf dyf-silu dyf-gelu dyf-hard" \
-                "dyf-silu-{aneg,apos} dyf-gelu-{aneg,apos}" >&2
+                "dyf-silu-{aneg,apos} dyf-gelu-{aneg,apos}" \
+                "dys-dgelu dys-dsilu dys-dgelu-{asmall,abig}" >&2
             return 2
             ;;
     esac

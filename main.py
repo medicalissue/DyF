@@ -53,6 +53,7 @@ import utils
 
 from dynamic_tanh import convert_ln_to_dyt
 from dynamic_floor import convert_ln_to_dyf
+from dynamic_saturation import convert_ln_to_dys
 
 
 def str2bool(v):
@@ -249,6 +250,21 @@ def get_args_parser():
     parser.add_argument('--dyf_gamma_init', type=float, default=1.0)
     parser.add_argument('--dyf_beta_init', type=float, default=0.0)
 
+    # ── Dynamic Saturation (DyS) ─────────────────────────────────────
+    # DyS(x)_k = γ_k · g(x_k / a) + β_k where g is the derivative of
+    # SiLU (dsilu) or GELU (dgelu). Both kernels are bounded in BOTH
+    # tails (decay to 0 as |u|→∞) — opposite of DyF's positive-unbounded.
+    parser.add_argument('--dynamic_saturation', type=str2bool, default=False,
+                        help='Replace LayerNorm with DyS (Dynamic Saturation)')
+    parser.add_argument('--dys_kernel', type=str, default='dgelu',
+                        choices=['dsilu', 'dgelu'],
+                        help='DyS kernel: dsilu or dgelu')
+    parser.add_argument('--dys_a_init', type=float, default=1.0,
+                        help='Initial input scale a (scalar). '
+                             'Default 1.0 puts unit-std input near peak.')
+    parser.add_argument('--dys_gamma_init', type=float, default=1.0)
+    parser.add_argument('--dys_beta_init', type=float, default=0.0)
+
     return parser
 
 def main(args):
@@ -345,8 +361,9 @@ def main(args):
     else:
         raise ValueError(f"Unrecognized model: {args.model}")
 
-    if args.dynamic_tanh and args.dynamic_floor:
-        raise ValueError("Pass at most one of --dynamic_tanh / --dynamic_floor")
+    swap_count = sum([args.dynamic_tanh, args.dynamic_floor, args.dynamic_saturation])
+    if swap_count > 1:
+        raise ValueError("Pass at most one of --dynamic_tanh / --dynamic_floor / --dynamic_saturation")
     if args.dynamic_tanh:
         model = convert_ln_to_dyt(model)
     if args.dynamic_floor:
@@ -357,6 +374,14 @@ def main(args):
             a_init=args.dyf_a_init,
             gamma_init=args.dyf_gamma_init,
             beta_init=args.dyf_beta_init,
+        )
+    if args.dynamic_saturation:
+        model = convert_ln_to_dys(
+            model,
+            kernel=args.dys_kernel,
+            a_init=args.dys_a_init,
+            gamma_init=args.dys_gamma_init,
+            beta_init=args.dys_beta_init,
         )
 
     if args.finetune:
