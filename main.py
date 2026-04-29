@@ -54,6 +54,7 @@ import utils
 from dynamic_tanh import convert_ln_to_dyt
 from dynamic_floor import convert_ln_to_dyf
 from dynamic_saturation import convert_ln_to_dys
+from dynamic_lsu import convert_silu_to_lsu
 
 
 def str2bool(v):
@@ -275,6 +276,13 @@ def get_args_parser():
     parser.add_argument('--dys_gamma_init', type=float, default=1.0)
     parser.add_argument('--dys_beta_init', type=float, default=0.0)
 
+    # ── LSU (LN-Sigmoid Unit) ──────────────────────────────────────
+    # Parameter-free activation that replaces SiLU/GELU in FFN with
+    # LSU(x) = x · (1 + 0.5·RMS(x)) / 2. Token-aware (RMS over channels).
+    # LayerNorms remain untouched.
+    parser.add_argument('--lsu_swap', type=str2bool, default=False,
+                        help='Replace every nn.SiLU/nn.GELU with LSU')
+
     return parser
 
 def main(args):
@@ -371,9 +379,14 @@ def main(args):
     else:
         raise ValueError(f"Unrecognized model: {args.model}")
 
-    swap_count = sum([args.dynamic_tanh, args.dynamic_floor, args.dynamic_saturation])
-    if swap_count > 1:
+    # LSU acts on activations (SiLU/GELU), the others on LayerNorm —
+    # they're orthogonal swaps and could in principle be combined, but
+    # we exclude that here for clean ablations.
+    ln_swap_count = sum([args.dynamic_tanh, args.dynamic_floor, args.dynamic_saturation])
+    if ln_swap_count > 1:
         raise ValueError("Pass at most one of --dynamic_tanh / --dynamic_floor / --dynamic_saturation")
+    if args.lsu_swap and ln_swap_count > 0:
+        raise ValueError("--lsu_swap is exclusive with the LN-replacement swaps for now")
     if args.dynamic_tanh:
         model = convert_ln_to_dyt(model)
     if args.dynamic_floor:
@@ -395,6 +408,8 @@ def main(args):
             gamma_init=args.dys_gamma_init,
             beta_init=args.dys_beta_init,
         )
+    if args.lsu_swap:
+        model = convert_silu_to_lsu(model)
 
     if args.finetune:
         if args.finetune.startswith('https'):

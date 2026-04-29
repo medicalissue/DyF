@@ -83,11 +83,18 @@ activation_flags() {
         dys-dsilu-mul-azero)
             printf '%s' "--dynamic_saturation true --dys_kernel dsilu --dys_a_form mul --dys_a_init 0.0 --dys_a_init_schedule constant --dys_gamma_init 1.0"
             ;;
+        # ── LSU (LN-Sigmoid Unit, parameter-free activation) ──────────
+        # Replaces every nn.SiLU/nn.GELU with x · (1 + 0.5·RMS(x))/2.
+        # LayerNorms remain in place; this is an activation swap, not a
+        # norm swap. Orthogonal to dyt/dyf/dys variants above.
+        lsu)
+            printf '%s' "--lsu_swap true"
+            ;;
         *)
             echo "ERROR: unknown activation '$act'." \
                 "Valid: ln dyt dyf dyf-silu dyf-gelu dyf-hard" \
                 "dyf-silu-{aneg,apos} dyf-gelu-{aneg,apos}" \
-                "dys-dgelu dys-dsilu dys-d{gelu,silu}-mul-azero" >&2
+                "dys-dgelu dys-dsilu dys-d{gelu,silu}-mul-azero lsu" >&2
             return 2
             ;;
     esac
