@@ -53,16 +53,20 @@ activation_flags() {
         # f'(0) = 1 (K=4 for dsilu, K=√(2π) for dgelu). a is per-site
         # input scale; sqrt schedule sets a_l = sqrt(l+1) to track
         # pre-LN residual stream std growth.
-        # γ_init values chosen so DyS output std = 1.0 when input is
-        # N(0, σ_l²) and a_l = σ_l (the sqrt schedule). σ of dsilu(u) at
-        # u~N(0,1) ≈ 0.615 → γ = 1.626 keeps output unit-variance and
-        # mimics LN's signal-preserving residual dynamics.
-        # σ of dgelu(u) at u~N(0,1) ≈ 0.439 → γ = 2.279.
+        # Peak-slope matching to DyT's α=0.5 init (DyT works with this
+        # for ViT-B). The zero-slope of DyS = γ·g'(0)/a; setting it to
+        # 0.5 with a=1 (DyT-like constant) gives:
+        #   dgelu: g'(0) = 1/√(2π) = 0.399  →  γ = 0.5/0.399 = 1.253
+        #   dsilu: g'(0) = 0.25            →  γ = 0.5/0.25  = 2.000
+        # Output std then comes out layer-dependent (~0.21 dgelu,
+        # ~0.31 dsilu) similar to DyT's own (~0.42-0.84) — not 1.
+        # Self-consistency we earlier obsessed about isn't required
+        # (DyT itself doesn't satisfy it).
         dys-dgelu)
-            printf '%s' "--dynamic_saturation true --dys_kernel dgelu --dys_a_init 1.0 --dys_a_init_schedule sqrt --dys_gamma_init 2.279"
+            printf '%s' "--dynamic_saturation true --dys_kernel dgelu --dys_a_init 1.0 --dys_a_init_schedule constant --dys_gamma_init 1.253"
             ;;
         dys-dsilu)
-            printf '%s' "--dynamic_saturation true --dys_kernel dsilu --dys_a_init 1.0 --dys_a_init_schedule sqrt --dys_gamma_init 1.626"
+            printf '%s' "--dynamic_saturation true --dys_kernel dsilu --dys_a_init 1.0 --dys_a_init_schedule constant --dys_gamma_init 2.000"
             ;;
         *)
             echo "ERROR: unknown activation '$act'." \

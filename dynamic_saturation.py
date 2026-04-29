@@ -1,24 +1,27 @@
 """DyS: Dynamic Saturation — bounded element-wise norm replacement.
 
-Two kernels share the form  g(u) = u · K · h(u)  where h is an S-curve's
-derivative ("bell") and K is a constant chosen so g'(0) = 1 (i.e. g(u)
-≈ u near zero, like identity). This makes init time near-LN-like:
-unit-std input passes through ~unchanged in the transition region, with
-saturation only kicking in for |u| > ~1.
+Two kernels share the form  g(u) = u · h(u)  where h is an S-curve's
+derivative ("bell"). Both are odd, bounded, decay to 0 in BOTH tails.
 
-    dsilu:  g(u) = 4 · u · σ(u)·(1 - σ(u))
-                   ↑ K=1/σ'(0) = 4
-    dgelu:  g(u) = √(2π) · u · φ(u)
-                   ↑ K=1/φ(0) = √(2π) ≈ 2.5066
+    dsilu:  g(u) = u · σ(u)·(1 - σ(u))     peak ≈ 0.224 at |u| ≈ 1.54
+    dgelu:  g(u) = u · φ(u)                peak ≈ 0.242 at |u| ≈ 1.00
+                       (φ = standard normal PDF, no √(2π) prefactor)
 
-Both are odd, bounded, decay to 0 in BOTH tails:
-    dsilu peak |g| ≈ 0.895 at |u| ≈ 1.54
-    dgelu peak |g| ≈ 0.607 at |u| ≈ 1.00  (= 1/e)
+Earlier we multiplied by a normalization constant K (4 for dsilu,
+√(2π) for dgelu) so g'(0) = 1, then paired with γ_init=1.626/2.279
+to get output std=1. The K factor is mathematically equivalent to
+folding it into γ (γ' = γ·K), so we drop K and absorb it into γ_init.
 
-The constant K is mathematically redundant with γ (γ' = γ·K) but
-makes init clean: γ_init=1.0 then means "near-identity at unit std",
-which is the same starting condition LayerNorm gets. Without K, you'd
-need γ_init=4 (silu) / γ_init=√(2π) (gelu) — awkward.
+Why drop K: AdamW's weight_decay acts as `γ ← γ·(1 - lr·wd)`, with
+penalty proportional to |γ|. With K and small γ_init=1.6, decay
+pressure is tiny. Without K and γ_init=6+, decay pressure is real
+and may shift γ trajectory. Forward output is identical either way,
+but training dynamics differ.
+
+Resulting γ_init for output std=1 (with a_init = sqrt(l+1) sqrt schedule
+giving u ~ N(0,1)):
+    dsilu: σ(g) ≈ 0.154 → γ_init = 1/0.154 = 6.494
+    dgelu: σ(g) ≈ 0.175 → γ_init = 1/0.175 = 5.711
 
 Note: dgelu kernel u · φ(u) is NOT the full d/du[GELU(u)] = Φ(u) +
 u·φ(u). We drop Φ(u) so g stays bounded (→ 0) in both tails — that's
@@ -52,22 +55,20 @@ from timm.layers import LayerNorm2d
 
 KERNELS = ("dsilu", "dgelu")
 
-# Normalization constants chosen so g'(0) = 1.
-#   dsilu: σ'(0) = 0.25  → multiply by 4
-#   dgelu: φ(0) = 1/√(2π) ≈ 0.399  → multiply by √(2π)
-# These cancel into the inv-pdf factor below: u · 4·σ(1-σ)  and
-# u · √(2π) · (1/√(2π)) · exp(-u²/2)  =  u · exp(-u²/2).
-_K_DSILU = 4.0
+# Raw, un-normalized kernels. The K constant (4 for dsilu, √(2π) for
+# dgelu) that used to live here has been absorbed into γ_init so that
+# AdamW weight_decay acts on the full effective scale.
+_INV_SQRT_2PI = 1.0 / (2.0 * 3.141592653589793) ** 0.5
 
 
 def _dsilu(u: torch.Tensor) -> torch.Tensor:
     s = torch.sigmoid(u)
-    return _K_DSILU * u * s * (1.0 - s)
+    return u * s * (1.0 - s)
 
 
 def _dgelu(u: torch.Tensor) -> torch.Tensor:
-    # √(2π) · u · φ(u) = u · exp(-u²/2). Same shape, normalized.
-    return u * torch.exp(-0.5 * u * u)
+    # u · φ(u), where φ(u) = exp(-u²/2) / √(2π). Peak ≈ 0.242 at u=±1.
+    return u * _INV_SQRT_2PI * torch.exp(-0.5 * u * u)
 
 
 class DynamicSaturation(nn.Module):
