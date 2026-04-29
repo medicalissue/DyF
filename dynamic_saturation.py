@@ -29,9 +29,8 @@ The full layer applies a learned scalar `a` as an input-side scale:
     DyS(x)_k = γ_k · g(x_k / a) + β_k
 
 Per-module:
-    a       — scalar (1 parameter)
-    γ, β    — per-channel (C each)
-    total   — 2C + 1
+    a, γ, β — all per-channel (C each)
+    total   — 3C
 
 Properties (vs DyF):
   - element-wise: yes (same as DyF)
@@ -75,11 +74,12 @@ class DynamicSaturation(nn.Module):
 
     Args:
         normalized_shape: int or tuple — channel count (last dim).
-            Used for per-channel γ, β. `a` is scalar regardless.
+            Used for per-channel a, γ, β.
         channels_last: True for (..., C); False for (N, C, H, W).
         kernel: "dsilu" or "dgelu".
-        a_init: initial scale (default 1.0). Recommended range [0.5, 2.0].
-            See module docstring + spec for sensitivity discussion.
+        a_init: initial scale (broadcast to all C channels). The
+            sqrt-schedule in `convert_ln_to_dys` overrides this on a
+            per-site basis (still per-channel uniform within a site).
         gamma_init, beta_init: per-channel affine init.
     """
 
@@ -105,9 +105,11 @@ class DynamicSaturation(nn.Module):
         self.beta_init = beta_init
 
         c = self.normalized_shape[-1]
-        # Scalar `a` — one input-scale per module. Floats only to avoid
-        # rounding the init away under bf16 down-conversion later.
-        self.a = nn.Parameter(torch.tensor(float(a_init)))
+        # Per-channel `a`, γ, β. `a` starts uniform at a_init within a
+        # site (the sqrt schedule sets a different value per site, but
+        # all C channels of one site share that init). Learning is then
+        # free to diverge per-channel.
+        self.a = nn.Parameter(torch.full((c,), float(a_init)))
         self.weight = nn.Parameter(torch.full((c,), gamma_init))
         self.bias = nn.Parameter(torch.full((c,), beta_init))
 
@@ -121,12 +123,15 @@ class DynamicSaturation(nn.Module):
         # erf/exp lose precision near the peak. Cast result back to x's
         # dtype so AMP autocast accounting stays consistent.
         x_fp = x.float()
-        # Promote `a` to fp32 too; division below would otherwise warn
-        # about dtype mismatch under autocast.
-        u = x_fp / self.a.float()
-        y = self._kernel(u).to(x.dtype)
+        a = self.a.float()
+        # Broadcast a across leading dims, matching the per-channel layout.
         if self.channels_last:
+            u = x_fp / a                          # (..., C) / (C,) → (..., C)
+            y = self._kernel(u).to(x.dtype)
             return y * self.weight + self.bias
+        # (N, C, H, W) layout
+        u = x_fp / a[None, :, None, None]
+        y = self._kernel(u).to(x.dtype)
         return y * self.weight[None, :, None, None] + self.bias[None, :, None, None]
 
     def extra_repr(self) -> str:
